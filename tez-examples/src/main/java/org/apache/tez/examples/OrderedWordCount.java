@@ -18,11 +18,7 @@
 
 package org.apache.tez.examples;
 
-import java.io.IOException;
-
-import org.apache.tez.client.CallerContext;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.google.common.base.Preconditions;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.Text;
@@ -30,13 +26,7 @@ import org.apache.hadoop.mapreduce.lib.input.TextInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.tez.client.TezClient;
-import org.apache.tez.dag.api.DAG;
-import org.apache.tez.dag.api.DataSinkDescriptor;
-import org.apache.tez.dag.api.DataSourceDescriptor;
-import org.apache.tez.dag.api.Edge;
-import org.apache.tez.dag.api.ProcessorDescriptor;
-import org.apache.tez.dag.api.TezConfiguration;
-import org.apache.tez.dag.api.Vertex;
+import org.apache.tez.dag.api.*;
 import org.apache.tez.examples.WordCount.TokenProcessor;
 import org.apache.tez.mapreduce.input.MRInput;
 import org.apache.tez.mapreduce.output.MROutput;
@@ -47,8 +37,10 @@ import org.apache.tez.runtime.library.api.KeyValuesReader;
 import org.apache.tez.runtime.library.conf.OrderedPartitionedKVEdgeConfig;
 import org.apache.tez.runtime.library.partitioner.HashPartitioner;
 import org.apache.tez.runtime.library.processor.SimpleProcessor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Preconditions;
+import java.io.IOException;
 
 /**
  * Simple example that extends the WordCount example to show a chain of processing.
@@ -200,6 +192,7 @@ public class OrderedWordCount extends TezExampleBase {
         args.length == 3 ? Integer.parseInt(args[2]) : 1, isDisableSplitGrouping(),
         "OrderedWordCount");
     LOG.info("Running OrderedWordCount");
+    LOG.info("JTH: runJob, doing nothing");
     return runDag(dag, isCountersLog(), LOG);
   }
 

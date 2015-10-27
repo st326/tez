@@ -18,35 +18,92 @@
 
 package org.apache.tez.dag.app;
 
-import static com.google.common.base.Preconditions.checkNotNull;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Function;
+import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.BiMap;
+import com.google.common.collect.HashBiMap;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.GnuParser;
+import org.apache.commons.cli.Options;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.token.Token;
+import org.apache.hadoop.service.*;
+import org.apache.hadoop.util.ShutdownHookManager;
+import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
+import org.apache.hadoop.yarn.api.ApplicationConstants;
+import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
+import org.apache.hadoop.yarn.api.records.*;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.event.Dispatcher;
+import org.apache.hadoop.yarn.event.Event;
+import org.apache.hadoop.yarn.event.EventHandler;
+import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
+import org.apache.hadoop.yarn.util.*;
+import org.apache.tez.client.CallerContext;
+import org.apache.tez.common.*;
+import org.apache.tez.common.counters.Limits;
+import org.apache.tez.common.security.ACLManager;
+import org.apache.tez.common.security.JobTokenIdentifier;
+import org.apache.tez.common.security.JobTokenSecretManager;
+import org.apache.tez.common.security.TokenCache;
+import org.apache.tez.dag.api.*;
+import org.apache.tez.dag.api.client.DAGClientHandler;
+import org.apache.tez.dag.api.client.DAGClientServer;
+import org.apache.tez.dag.api.records.DAGProtos;
+import org.apache.tez.dag.api.records.DAGProtos.*;
+import org.apache.tez.dag.app.RecoveryParser.RecoveredDAGData;
+import org.apache.tez.dag.app.dag.DAG;
+import org.apache.tez.dag.app.dag.*;
+import org.apache.tez.dag.app.dag.Vertex;
+import org.apache.tez.dag.app.dag.event.*;
+import org.apache.tez.dag.app.dag.impl.DAGImpl;
+import org.apache.tez.dag.app.launcher.ContainerLauncherManager;
+import org.apache.tez.dag.app.rm.*;
+import org.apache.tez.dag.app.rm.container.AMContainerEventType;
+import org.apache.tez.dag.app.rm.container.AMContainerMap;
+import org.apache.tez.dag.app.rm.container.ContainerContextMatcher;
+import org.apache.tez.dag.app.rm.node.AMNodeEventType;
+import org.apache.tez.dag.app.rm.node.AMNodeTracker;
+import org.apache.tez.dag.app.web.WebUIService;
+import org.apache.tez.dag.history.DAGHistoryEvent;
+import org.apache.tez.dag.history.HistoryEventHandler;
+import org.apache.tez.dag.history.events.*;
+import org.apache.tez.dag.history.utils.DAGUtils;
+import org.apache.tez.dag.records.TezDAGID;
+import org.apache.tez.dag.records.TezTaskAttemptID;
+import org.apache.tez.dag.records.TezTaskID;
+import org.apache.tez.dag.records.TezVertexID;
+import org.apache.tez.dag.utils.Graph;
+import org.apache.tez.dag.utils.RelocalizationUtils;
+import org.apache.tez.dag.utils.Simple2LevelVersionComparator;
+import org.apache.tez.serviceplugins.api.TaskScheduler;
+import org.apache.tez.serviceplugins.api.TaskSchedulerContext;
+import org.apache.tez.util.TezMxBeanResourceCalculator;
+import org.codehaus.jettison.json.JSONException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.*;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.nio.ByteBuffer;
 import java.security.PrivilegedExceptionAction;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Calendar;
-import java.util.Collections;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.Map.Entry;
-import java.util.Random;
-import java.util.Set;
-import java.util.Timer;
-import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -56,137 +113,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import com.google.common.collect.BiMap;
-import com.google.common.collect.HashBiMap;
-import com.google.common.collect.Lists;
-
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.GnuParser;
-import org.apache.commons.cli.Options;
-import org.apache.tez.client.CallerContext;
-import org.apache.tez.common.TezUtils;
-import org.apache.tez.dag.api.NamedEntityDescriptor;
-import org.apache.tez.dag.api.SessionNotRunning;
-import org.apache.tez.dag.api.UserPayload;
-import org.apache.tez.dag.api.records.DAGProtos.AMPluginDescriptorProto;
-import org.apache.tez.dag.api.records.DAGProtos.ConfigurationProto;
-import org.apache.tez.dag.api.records.DAGProtos.TezNamedEntityDescriptorProto;
-import org.apache.tez.dag.app.dag.event.DAGAppMasterEventDagCleanup;
-import org.apache.tez.dag.history.events.DAGRecoveredEvent;
-import org.apache.tez.dag.records.TezTaskAttemptID;
-import org.apache.tez.dag.records.TezTaskID;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.security.Credentials;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.token.Token;
-import org.apache.hadoop.service.AbstractService;
-import org.apache.hadoop.service.Service;
-import org.apache.hadoop.service.ServiceOperations;
-import org.apache.hadoop.service.ServiceStateChangeListener;
-import org.apache.hadoop.service.ServiceStateException;
-import org.apache.hadoop.util.ShutdownHookManager;
-import org.apache.hadoop.yarn.YarnUncaughtExceptionHandler;
-import org.apache.hadoop.yarn.api.ApplicationConstants;
-import org.apache.hadoop.yarn.api.ApplicationConstants.Environment;
-import org.apache.hadoop.yarn.api.records.ApplicationAccessType;
-import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
-import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.LocalResource;
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.event.Dispatcher;
-import org.apache.hadoop.yarn.event.Event;
-import org.apache.hadoop.yarn.event.EventHandler;
-import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
-import org.apache.hadoop.yarn.util.Clock;
-import org.apache.hadoop.yarn.util.ConverterUtils;
-import org.apache.hadoop.yarn.util.ResourceCalculatorProcessTree;
-import org.apache.hadoop.yarn.util.SystemClock;
-import org.apache.tez.common.AsyncDispatcher;
-import org.apache.tez.common.AsyncDispatcherConcurrent;
-import org.apache.tez.common.GcTimeUpdater;
-import org.apache.tez.common.TezCommonUtils;
-import org.apache.tez.common.TezConverterUtils;
-import org.apache.tez.common.TezUtilsInternal;
-import org.apache.tez.common.VersionInfo;
-import org.apache.tez.common.counters.Limits;
-import org.apache.tez.common.security.ACLManager;
-import org.apache.tez.common.security.JobTokenIdentifier;
-import org.apache.tez.common.security.JobTokenSecretManager;
-import org.apache.tez.common.security.TokenCache;
-import org.apache.tez.dag.api.DagTypeConverters;
-import org.apache.tez.dag.api.TezConfiguration;
-import org.apache.tez.dag.api.TezConstants;
-import org.apache.tez.dag.api.TezException;
-import org.apache.tez.dag.api.TezUncheckedException;
-import org.apache.tez.dag.api.client.DAGClientHandler;
-import org.apache.tez.dag.api.client.DAGClientServer;
-import org.apache.tez.dag.api.records.DAGProtos;
-import org.apache.tez.dag.api.records.DAGProtos.DAGPlan;
-import org.apache.tez.dag.api.records.DAGProtos.PlanLocalResourcesProto;
-import org.apache.tez.dag.api.records.DAGProtos.VertexPlan;
-import org.apache.tez.dag.app.RecoveryParser.RecoveredDAGData;
-import org.apache.tez.dag.app.dag.DAG;
-import org.apache.tez.dag.app.dag.DAGState;
-import org.apache.tez.dag.app.dag.Task;
-import org.apache.tez.dag.app.dag.TaskAttempt;
-import org.apache.tez.dag.app.dag.Vertex;
-import org.apache.tez.dag.app.dag.event.DAGAppMasterEvent;
-import org.apache.tez.dag.app.dag.event.DAGAppMasterEventDAGFinished;
-import org.apache.tez.dag.app.dag.event.DAGAppMasterEventSchedulingServiceError;
-import org.apache.tez.dag.app.dag.event.DAGAppMasterEventType;
-import org.apache.tez.dag.app.dag.event.DAGEvent;
-import org.apache.tez.dag.app.dag.event.DAGEventRecoverEvent;
-import org.apache.tez.dag.app.dag.event.DAGEventStartDag;
-import org.apache.tez.dag.app.dag.event.DAGEventType;
-import org.apache.tez.dag.app.dag.event.SpeculatorEvent;
-import org.apache.tez.dag.app.dag.event.SpeculatorEventType;
-import org.apache.tez.dag.app.dag.event.TaskAttemptEvent;
-import org.apache.tez.dag.app.dag.event.TaskAttemptEventType;
-import org.apache.tez.dag.app.dag.event.TaskEvent;
-import org.apache.tez.dag.app.dag.event.TaskEventType;
-import org.apache.tez.dag.app.dag.event.VertexEvent;
-import org.apache.tez.dag.app.dag.event.VertexEventType;
-import org.apache.tez.dag.app.dag.impl.DAGImpl;
-import org.apache.tez.dag.app.launcher.ContainerLauncherManager;
-import org.apache.tez.dag.app.rm.AMSchedulerEventType;
-import org.apache.tez.dag.app.rm.ContainerLauncherEventType;
-import org.apache.tez.dag.app.rm.TaskSchedulerManager;
-import org.apache.tez.dag.app.rm.container.AMContainerEventType;
-import org.apache.tez.dag.app.rm.container.AMContainerMap;
-import org.apache.tez.dag.app.rm.container.ContainerContextMatcher;
-import org.apache.tez.common.ContainerSignatureMatcher;
-import org.apache.tez.dag.app.rm.node.AMNodeEventType;
-import org.apache.tez.dag.app.rm.node.AMNodeTracker;
-import org.apache.tez.dag.app.web.WebUIService;
-import org.apache.tez.dag.history.DAGHistoryEvent;
-import org.apache.tez.dag.history.HistoryEventHandler;
-import org.apache.tez.dag.history.events.AMLaunchedEvent;
-import org.apache.tez.dag.history.events.AMStartedEvent;
-import org.apache.tez.dag.history.events.AppLaunchedEvent;
-import org.apache.tez.dag.history.events.DAGKillRequestEvent;
-import org.apache.tez.dag.history.events.DAGSubmittedEvent;
-import org.apache.tez.dag.history.utils.DAGUtils;
-import org.apache.tez.dag.records.TezDAGID;
-import org.apache.tez.dag.records.TezVertexID;
-import org.apache.tez.dag.utils.Graph;
-import org.apache.tez.dag.utils.RelocalizationUtils;
-import org.apache.tez.dag.utils.Simple2LevelVersionComparator;
-import org.apache.tez.util.TezMxBeanResourceCalculator;
-import org.codehaus.jettison.json.JSONException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Function;
-import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Maps;
-import com.google.common.util.concurrent.ListeningExecutorService;
-import com.google.common.util.concurrent.MoreExecutors;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 /**
  * The Tez DAG Application Master.
@@ -218,7 +145,6 @@ public class DAGAppMaster extends AbstractService {
   private static final Joiner PATH_JOINER = Joiner.on('/');
 
   private static Pattern sanitizeLabelPattern = Pattern.compile("[:\\-\\W]+");
-
   private Clock clock;
   private final boolean isSession;
   private long appsStartTime;
@@ -237,6 +163,7 @@ public class DAGAppMaster extends AbstractService {
   private ContainerSignatureMatcher containerSignatureMatcher;
   private AMContainerMap containers;
   private AMNodeTracker nodes;
+  private TaskScheduler taskScheduler;
   private AppContext context;
   private Configuration amConf;
   private AsyncDispatcher dispatcher;
@@ -244,8 +171,7 @@ public class DAGAppMaster extends AbstractService {
   private ContainerHeartbeatHandler containerHeartbeatHandler;
   private TaskHeartbeatHandler taskHeartbeatHandler;
   private TaskCommunicatorManagerInterface taskCommunicatorManager;
-  private JobTokenSecretManager jobTokenSecretManager =
-      new JobTokenSecretManager();
+  private JobTokenSecretManager jobTokenSecretManager = new JobTokenSecretManager();
   private Token<JobTokenIdentifier> sessionToken;
   private DagEventDispatcher dagEventDispatcher;
   private VertexEventDispatcher vertexEventDispatcher;
@@ -282,7 +208,7 @@ public class DAGAppMaster extends AbstractService {
   private Path currentRecoveryDataDir;
   private Path tezSystemStagingDir;
   private FileSystem recoveryFS;
-  
+
   private ExecutorService rawExecutor;
   private ListeningExecutorService execService;
 
@@ -314,7 +240,7 @@ public class DAGAppMaster extends AbstractService {
   private String clientVersion;
   private boolean versionMismatch = false;
   private String versionMismatchDiagnostics;
-  
+
   private ResourceCalculatorProcessTree cpuPlugin;
   private GcTimeUpdater gcPlugin;
 
@@ -369,7 +295,7 @@ public class DAGAppMaster extends AbstractService {
     return PATH_JOINER.join(nodeHttpAddress, "node", "containerlogs",
         containerId, user);
   }
-  
+
   private void initResourceCalculatorPlugins() {
     Class<? extends ResourceCalculatorProcessTree> clazz = amConf.getClass(
         TezConfiguration.TEZ_TASK_RESOURCE_CALCULATOR_PROCESS_TREE_CLASS,
@@ -384,10 +310,10 @@ public class DAGAppMaster extends AbstractService {
       pid = processName.split("@")[0];
     }
     cpuPlugin = ResourceCalculatorProcessTree.getResourceCalculatorProcessTree(pid, clazz, amConf);
-    
+
     gcPlugin = new GcTimeUpdater(null);
   }
-  
+
   private long getAMCPUTime() {
     if (cpuPlugin != null) {
       cpuPlugin.updateProcessTree();
@@ -521,14 +447,14 @@ public class DAGAppMaster extends AbstractService {
       dispatcher.register(TaskEventType.class, new TaskEventDispatcher());
       dispatcher.register(TaskAttemptEventType.class, new TaskAttemptEventDispatcher());
     } else {
-      int concurrency = conf.getInt(TezConfiguration.TEZ_AM_CONCURRENT_DISPATCHER_CONCURRENCY, 
+      int concurrency = conf.getInt(TezConfiguration.TEZ_AM_CONCURRENT_DISPATCHER_CONCURRENCY,
           TezConfiguration.TEZ_AM_CONCURRENT_DISPATCHER_CONCURRENCY_DEFAULT);
       AsyncDispatcherConcurrent sharedDispatcher = dispatcher.registerAndCreateDispatcher(
           TaskEventType.class, new TaskEventDispatcher(), "TaskAndAttemptEventThread", concurrency);
       dispatcher.registerWithExistingDispatcher(TaskAttemptEventType.class,
           new TaskAttemptEventDispatcher(), sharedDispatcher);
     }
-    
+
     // register other delegating dispatchers
     dispatcher.registerAndCreateDispatcher(SpeculatorEventType.class, new SpeculatorEventHandler(),
         "Speculator");
@@ -541,8 +467,6 @@ public class DAGAppMaster extends AbstractService {
         LOG.debug("Web UI Service is not enabled.");
       }
     }
-
-
 
     this.taskSchedulerManager = new TaskSchedulerManager(context,
         clientRpcServer, dispatcher.getEventHandler(), containerSignatureMatcher, webUIService,
@@ -635,7 +559,7 @@ public class DAGAppMaster extends AbstractService {
   protected ContainerSignatureMatcher createContainerSignatureMatcher() {
     return new ContainerContextMatcher();
   }
-  
+
   @VisibleForTesting
   protected AsyncDispatcher createDispatcher() {
     return new AsyncDispatcher("Central");
@@ -654,7 +578,7 @@ public class DAGAppMaster extends AbstractService {
       System.exit(0);
     }
   }
-  
+
   @VisibleForTesting
   protected TaskSchedulerManager getTaskSchedulerManager() {
     return taskSchedulerManager;
@@ -1305,7 +1229,7 @@ public class DAGAppMaster extends AbstractService {
     }
     dispatcher.getEventHandler().handle(new DAGEvent(dag.getID(), DAGEventType.DAG_KILL));
   }
-  
+
   private Map<String, LocalResource> getAdditionalLocalResourceDiff(
       DAG dag, Map<String, LocalResource> additionalResources) throws TezException {
     if (additionalResources == null) {
@@ -1452,7 +1376,7 @@ public class DAGAppMaster extends AbstractService {
     public DAG getCurrentDAG() {
       return dag;
     }
-    
+
     @Override
     public ListeningExecutorService getExecService() {
       return execService;
@@ -1626,7 +1550,7 @@ public class DAGAppMaster extends AbstractService {
     public long getCumulativeCPUTime() {
       return getAMCPUTime();
     }
-    
+
     @Override
     public long getCumulativeGCTime() {
       return getAMGCTime();
@@ -1816,7 +1740,7 @@ public class DAGAppMaster extends AbstractService {
     }
     return null;
   }
-  
+
   @Override
   public synchronized void serviceStart() throws Exception {
 
@@ -2015,6 +1939,7 @@ public class DAGAppMaster extends AbstractService {
     @SuppressWarnings("unchecked")
     @Override
     public void handle(DAGEvent event) {
+      System.out.println("JTH: Handled DAG Event");
       DAG dag = context.getCurrentDAG();
       int eventDagIndex = event.getDAGId().getId();
       if (dag == null || eventDagIndex != dag.getID().getId()) {
@@ -2029,19 +1954,20 @@ public class DAGAppMaster extends AbstractService {
     @Override
     public void handle(TaskEvent event) {
       DAG dag = context.getCurrentDAG();
-      int eventDagIndex = 
+      int eventDagIndex =
           event.getTaskID().getVertexID().getDAGId().getId();
       if (dag == null || eventDagIndex != dag.getID().getId()) {
         return; // event not relevant any more
       }
-      
+
+      System.out.println("JTH: TaskEventDispatcher: " + event.toString());
       Task task =
           dag.getVertex(event.getTaskID().getVertexID()).
               getTask(event.getTaskID());
       ((EventHandler<TaskEvent>)task).handle(event);
     }
   }
-  
+
   private class SpeculatorEventHandler implements EventHandler<SpeculatorEvent> {
     @Override
     public void handle(SpeculatorEvent event) {
@@ -2059,8 +1985,9 @@ public class DAGAppMaster extends AbstractService {
     @SuppressWarnings("unchecked")
     @Override
     public void handle(TaskAttemptEvent event) {
+      System.out.println("JTH: TaskAttemptEventDispatcher. Event-Type: " + event.toString());
       DAG dag = context.getCurrentDAG();
-      int eventDagIndex = 
+      int eventDagIndex =
           event.getTaskAttemptID().getTaskID().getVertexID().getDAGId().getId();
       if (dag == null || eventDagIndex != dag.getID().getId()) {
         return; // event not relevant any more
@@ -2069,6 +1996,7 @@ public class DAGAppMaster extends AbstractService {
           dag.getVertex(event.getTaskAttemptID().getTaskID().getVertexID()).
               getTask(event.getTaskAttemptID().getTaskID());
       TaskAttempt attempt = task.getAttempt(event.getTaskAttemptID());
+      System.out.println("Assigned Container: " + attempt.getAssignedContainerID());
       ((EventHandler<TaskAttemptEvent>) attempt).handle(event);
     }
   }
@@ -2079,12 +2007,12 @@ public class DAGAppMaster extends AbstractService {
     @Override
     public void handle(VertexEvent event) {
       DAG dag = context.getCurrentDAG();
-      int eventDagIndex = 
+      int eventDagIndex =
           event.getVertexId().getDAGId().getId();
       if (dag == null || eventDagIndex != dag.getID().getId()) {
         return; // event not relevant any more
       }
-      
+
       Vertex vertex =
           dag.getVertex(event.getVertexId());
       ((EventHandler<VertexEvent>) vertex).handle(event);
@@ -2139,12 +2067,7 @@ public class DAGAppMaster extends AbstractService {
       }
 
       // TODO Should this be defaulting to 1. Was there a version of YARN where this was not setup ?
-      int maxAppAttempts = 1;
-      String maxAppAttemptsEnv = System.getenv(
-          ApplicationConstants.MAX_APP_ATTEMPTS_ENV);
-      if (maxAppAttemptsEnv != null) {
-        maxAppAttempts = Integer.parseInt(maxAppAttemptsEnv);
-      }
+      final int maxAppAttempts = YarnConfiguration.DEFAULT_RM_AM_MAX_ATTEMPTS;
 
       validateInputParam(appSubmitTimeStr,
           ApplicationConstants.APP_SUBMIT_TIME_ENV);
@@ -2340,7 +2263,10 @@ public class DAGAppMaster extends AbstractService {
 
   private void startDAGExecution(DAG dag, final Map<String, LocalResource> additionalAmResources)
       throws TezException {
+    System.out.println("JTH: startDagEvent()");
+    System.out.println("Entered ApplicationMaster");
     currentDAG = dag;
+
     // Try localizing the actual resources.
     List<URL> additionalUrlsForClasspath;
     try {
@@ -2358,7 +2284,7 @@ public class DAGAppMaster extends AbstractService {
 
     dagIDs.add(currentDAG.getID().toString());
     // End of creating the job.
-    ((RunningAppContext) context).setDAG(currentDAG);
+    context.setDAG(currentDAG);
 
     // Send out an event to inform components that a new DAG has been submitted.
     // Information about this DAG is available via the context.
@@ -2370,11 +2296,44 @@ public class DAGAppMaster extends AbstractService {
     // job-init to be done completely here.
     dagEventDispatcher.handle(initDagEvent);
 
+    try {
+      Thread.sleep(1000);
+    } catch (InterruptedException e) {
+      e.printStackTrace();
+    }
+
+    UserPayload payload = UserPayload.create(ByteBuffer.wrap("testPayload".getBytes()));
+    TaskSchedulerContext taskSchedulerContext = new TaskSchedulerContextImpl(taskSchedulerManager, context, 0, "foobar:9000", 0, nmHost, nmPort, payload);
+    taskScheduler = new YarnTaskSchedulerService(taskSchedulerContext);
+    try {
+      taskScheduler.initialize();
+      taskScheduler.start();
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+
+    Object foo = new Object();
+    System.out.println("JTH: Allocating Task");
+    Resource res = Records.newRecord(Resource.class);
+    res.setMemory(128);
+    res.setVirtualCores(1);
+    Priority pri = Records.newRecord(Priority.class);
+    pri.setPriority(0);
+    String cookie = "m4gIcC0oki3";
+    taskScheduler.allocateTask(foo, res, null, null, pri, null, cookie);
+
+    //signalFinish();
     // All components have started, start the job.
     /** create a job-start event to get this ball rolling */
-    DAGEvent startDagEvent = new DAGEventStartDag(currentDAG.getID(), additionalUrlsForClasspath);
+    //DAGEvent startDagEvent = new DAGEventStartDag(currentDAG.getID(), additionalUrlsForClasspath);
     /** send the job-start event. this triggers the job execution. */
-    sendEvent(startDagEvent);
+    //sendEvent(startDagEvent);
+  }
+
+  private void signalFinish() {
+    DAGAppMasterEvent event = new DAGAppMasterEvent(DAGAppMasterEventType.DAG_FINISHED);
+    this.state = DAGAppMasterState.SUCCEEDED;
+    sendEvent(event);
   }
 
   public static void initAndStartAppMaster(final DAGAppMaster appMaster,

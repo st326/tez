@@ -18,19 +18,8 @@
 
 package org.apache.tez.examples;
 
-import javax.annotation.Nullable;
-
-import java.io.IOException;
-import java.io.PrintStream;
-import java.util.Set;
-
 import com.google.common.collect.Sets;
-
 import org.apache.commons.cli.Options;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
-import org.apache.tez.client.CallerContext;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
@@ -38,6 +27,8 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.GenericOptionsParser;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.hadoop.yarn.api.records.ApplicationId;
+import org.apache.tez.client.CallerContext;
 import org.apache.tez.client.TezClient;
 import org.apache.tez.dag.api.DAG;
 import org.apache.tez.dag.api.TezConfiguration;
@@ -46,6 +37,13 @@ import org.apache.tez.dag.api.client.DAGClient;
 import org.apache.tez.dag.api.client.DAGStatus;
 import org.apache.tez.dag.api.client.StatusGetOpts;
 import org.apache.tez.runtime.library.api.TezRuntimeConfiguration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.util.Set;
 
 @InterfaceAudience.Private
 public abstract class TezExampleBase extends Configured implements Tool {
@@ -149,12 +147,16 @@ public abstract class TezExampleBase extends Configured implements Tool {
     }
     dag.setCallerContext(callerContext);
 
+    //dag = DAG.create("dummy-job");
+
     DAGClient dagClient = tezClientInternal.submitDAG(dag);
     Set<StatusGetOpts> getOpts = Sets.newHashSet();
     if (printCounters) {
       getOpts.add(StatusGetOpts.GET_COUNTERS);
     }
+    LOG.info("JTH: AppMaster Status: " + tezClientInternal.getAppMasterStatus().toString());
 
+    LOG.info("JTH: runDag(), doing nothing");
     DAGStatus dagStatus;
     dagStatus = dagClient.waitForCompletionWithStatusUpdates(getOpts);
 

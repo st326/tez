@@ -18,30 +18,20 @@
 
 package org.apache.tez.client;
 
-import java.io.IOException;
-import java.net.InetAddress;
-import java.nio.ByteBuffer;
-import java.util.List;
-
-import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationResponse;
-import org.apache.hadoop.yarn.api.records.ContainerId;
-import org.apache.hadoop.yarn.api.records.FinalApplicationStatus;
-import org.apache.hadoop.yarn.client.api.YarnClientApplication;
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import org.apache.hadoop.yarn.exceptions.YarnException;
-import org.apache.hadoop.yarn.util.Clock;
-import org.apache.hadoop.yarn.util.Records;
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.security.Credentials;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.yarn.api.records.ApplicationId;
-import org.apache.hadoop.yarn.api.records.ApplicationSubmissionContext;
-import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
-import org.apache.hadoop.yarn.api.records.ApplicationReport;
-import org.apache.hadoop.yarn.api.records.YarnApplicationState;
+import org.apache.hadoop.yarn.api.protocolrecords.GetNewApplicationResponse;
+import org.apache.hadoop.yarn.api.records.*;
+import org.apache.hadoop.yarn.client.api.YarnClientApplication;
+import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions.YarnException;
+import org.apache.hadoop.yarn.util.Clock;
+import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.SystemClock;
 import org.apache.tez.common.TezCommonUtils;
 import org.apache.tez.dag.api.TezConfiguration;
@@ -54,7 +44,10 @@ import org.apache.tez.dag.app.dag.DAG;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
+import java.io.IOException;
+import java.net.InetAddress;
+import java.nio.ByteBuffer;
+import java.util.List;
 
 public class LocalClient extends FrameworkClient {
   public static final Logger LOG = LoggerFactory.getLogger(LocalClient.class);
@@ -73,6 +66,7 @@ public class LocalClient extends FrameworkClient {
       "org.apache.tez.dag.app.dag.impl.DAGSchedulerNaturalOrderControlled";
 
   public LocalClient() {
+    LOG.info("JTH: LocalClient()");
   }
 
   @Override
@@ -122,6 +116,7 @@ public class LocalClient extends FrameworkClient {
     context.setApplicationId(appId);
     GetNewApplicationResponse response = Records.newRecord(GetNewApplicationResponse.class);
     response.setApplicationId(appId);
+    LOG.info("JTH: createApplication()");
     return new YarnClientApplication(response, context);
   }
 
@@ -129,6 +124,7 @@ public class LocalClient extends FrameworkClient {
   public ApplicationId submitApplication(ApplicationSubmissionContext appContext) throws IOException, YarnException {
     ApplicationId appId = appContext.getApplicationId();
     startDAGAppMaster(appContext);
+    LOG.info("JTH: submitApplication()");
     return appId;
   }
 
